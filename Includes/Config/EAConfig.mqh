@@ -14,9 +14,12 @@ public:
    // Risk Management
    double BaseRiskPerTrade;
    double MaxRiskPerTrade;
+   double HighConfidenceRisk; // PROFIT OPTIMIZED: Separate risk for A+ setups
    bool UseConfluenceBasedRisk;
    double HighConfidenceMultiplier;
    double MediumConfidenceMultiplier;
+   bool UseKellyCriterion; // PROFIT OPTIMIZED: Enable Kelly Criterion
+   double KellyFraction; // PROFIT OPTIMIZED: Kelly fraction (0.1-0.25)
    double MaxDailyLoss;
    double MaxWeeklyLoss;
    double MaxMonthlyLoss;
@@ -51,6 +54,7 @@ public:
    // Session Filters
    bool TradeLondonOpen;
    bool TradeNYOpen;
+   bool TradeLondonNYOverlap; // PROFIT OPTIMIZED: Focus on overlap only
    bool TradeAsianSession;
    bool TradeAllDay;
    bool AvoidNews;
@@ -84,6 +88,7 @@ public:
    bool RequireOrderBlock;
    bool RequireFVG;
    bool RequireBOSConfirmation;
+   // RequireCHoCH is already declared in Market Structure section (line 67)
    bool RequireLiquiditySweep;
    bool RequireHTFBias;
    bool RequireM1MSS;
@@ -92,6 +97,8 @@ public:
    bool UseMomentumConfirmation;
    bool UseTickDivergence;
    double MinMomentumStrength;
+   bool UseMarketRegimeFilter; // PROFIT OPTIMIZED: Enable market regime filter
+   double MinVolatilityPercent; // PROFIT OPTIMIZED: Minimum volatility requirement
    
    // Strategy Settings
    bool UseOB_FVG_Combo;
@@ -141,8 +148,7 @@ public:
    bool UseVolumeProfile;
    bool OptimizeBarProcessing;
    bool UseDynamicRisk;
-   bool UseKellyCriterion;
-   double KellyFraction;
+   // UseKellyCriterion and KellyFraction are already declared in Risk Management section (lines 21-22)
    bool UseADXFilter;
    double MinADX;
    double MaxADXForRanging;

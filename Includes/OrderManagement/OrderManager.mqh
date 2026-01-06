@@ -103,6 +103,35 @@ public:
       return PositionSelect(m_symbol);
    }
    
+   bool ClosePosition(ulong ticket)
+   {
+      if(!PositionSelectByTicket(ticket))
+         return false;
+      
+      if(m_trade.PositionClose(ticket))
+      {
+         if(m_logger != NULL)
+            m_logger.LogTrade("Position closed. Ticket: " + IntegerToString(ticket));
+         return true;
+      }
+      return false;
+   }
+   
+   bool ClosePositionPartially(ulong ticket, double volume)
+   {
+      if(!PositionSelectByTicket(ticket))
+         return false;
+      
+      if(m_trade.PositionClosePartial(ticket, volume))
+      {
+         if(m_logger != NULL)
+            m_logger.LogTrade("Position partially closed. Ticket: " + IntegerToString(ticket) + 
+                            " Volume: " + DoubleToString(volume, 2));
+         return true;
+      }
+      return false;
+   }
+   
    bool ModifyPosition(ulong ticket, double stopLoss, double takeProfit)
    {
       if(!PositionSelectByTicket(ticket))

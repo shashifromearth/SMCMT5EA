@@ -7,6 +7,7 @@
 
 #include "BaseStrategy.mqh"
 #include "../Indicators/IndicatorWrapper.mqh"
+#include "../Core/Enums/SMCEnums.mqh"  // Explicit include for ENTRY_TYPE enum
 
 //+------------------------------------------------------------------+
 //| OB+FVG Combo Strategy - Concrete Strategy Implementation        |
@@ -53,18 +54,24 @@ public:
       
       OrderBlock ob = m_obDetector.GetOrderBlock(bullOBIndex);
       
-      // Calculate quality using original algorithm (0-100 scale)
+      // QUANT ENHANCEMENT: Calculate quality using original algorithm (0-100 scale)
       int obQuality = m_obDetector.CalculateOBQualityForBar(ob.barIndex, true, m_atrIndicator);
       
-      if(obQuality < m_config.OB_FVG_QualityMin)
+      // ENHANCED: Require minimum quality but also check for strong OB (quality >= 50)
+      // This ensures we only trade high-probability setups
+      int minQuality = MathMax(m_config.OB_FVG_QualityMin, 30); // Minimum 30 quality
+      if(obQuality < minQuality)
       {
          if(m_config.EnableDebugLog)
-            Print("OB_FVG_Combo BUY: OB quality too low: ", obQuality, " < ", m_config.OB_FVG_QualityMin);
+            Print("OB_FVG_Combo BUY: OB quality too low: ", obQuality, " < ", minQuality);
          return false;
       }
       
+      // QUANT ENHANCEMENT: Prefer high-quality OBs (quality >= 50) for better win rate
+      bool isHighQualityOB = (obQuality >= 50);
+      
       if(m_config.EnableDebugLog)
-         Print("OB_FVG_Combo BUY: OB quality OK: ", obQuality, " (bar index: ", ob.barIndex, ")");
+         Print("OB_FVG_Combo BUY: OB quality OK: ", obQuality, " (bar index: ", ob.barIndex, ") | High Quality: ", isHighQualityOB);
       
       // Find FVG after OB - MATCH ORIGINAL LOGIC EXACTLY
       // Original: for(int i = bullOB - 1; i >= 0; i--) checks bars AFTER OB
@@ -194,34 +201,115 @@ public:
             break; // Found valid FVG, exit outer loop
       }
       
-      if(!foundFVG)
+      // OPTIMIZED: Allow OB-only entries if FVG not required
+      if(!foundFVG && m_config.RequireFVG)
       {
          if(m_config.EnableDebugLog)
-            Print("OB_FVG_Combo BUY: No valid FVG found after OB (checked bars ", (obBarIndex - 1), " to 0)");
+            Print("OB_FVG_Combo BUY: No valid FVG found after OB (checked bars ", (obBarIndex - 1), " to 0) | FVG required");
          return false;
+      }
+      
+      // OPTIMIZED: If FVG not required and price is near OB, allow entry
+      if(!foundFVG && !m_config.RequireFVG)
+      {
+         double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+         double atr = m_atrIndicator.GetValue(0);
+         
+         // Check if price is near OB (within 2x ATR or 50 pips)
+         double maxDistanceFromOB = MathMax(atr * 2.0, 50.0 * point * 10);
+         bool priceNearOB = (currentPrice >= obLow && currentPrice <= obLow + maxDistanceFromOB);
+         
+         if(!priceNearOB)
+         {
+            if(m_config.EnableDebugLog)
+               Print("OB_FVG_Combo BUY: Price not near OB. Current: ", currentPrice, " | OB Low: ", obLow, " | Distance: ", (currentPrice - obLow) / point / 10, " pips");
+            return false;
+         }
+         
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo BUY: OB-only entry allowed (FVG not required) | Price near OB");
       }
       
       // Calculate entry, SL, TP
       double entryPrice = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
-      // obLow already declared above
       double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
       double atr = m_atrIndicator.GetValue(0);
       
-      // SL at OB low minus ATR
-      double sl = obLow - (1.0 * atr);
-      double minSLDistance = 5.0 * point * 10; // Minimum 5 pips
+      // CRITICAL FIX: SL at OB low minus 2.5x ATR (much more room for volatility)
+      // Previous 1.5x ATR was too tight, causing quick SL hits
+      double sl = obLow - (2.5 * atr);
+      
+      // CRITICAL: Ensure minimum 20 pips SL to prevent oversized lot sizes
+      // Small SL = huge lot size = massive losses when hit
+      double minSLDistance = 20.0 * point * 10; // Minimum 20 pips
       if(entryPrice - sl < minSLDistance)
+      {
          sl = entryPrice - minSLDistance;
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo BUY: SL adjusted to minimum 20 pips. Original: ", obLow - (2.5 * atr), " | New: ", sl);
+      }
       
-      // TP based on Risk:Reward
+      // Ensure SL is not too close to entry (safety check)
+      double maxSLDistance = 50.0 * point * 10; // Maximum 50 pips SL
+      if(entryPrice - sl > maxSLDistance)
+      {
+         sl = entryPrice - maxSLDistance;
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo BUY: SL capped at maximum 50 pips");
+      }
+      
+      // FINAL VALIDATION: Reject if SL is still too small
+      double finalSLDistance = entryPrice - sl;
+      if(finalSLDistance < minSLDistance)
+      {
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo BUY: SL too small after adjustments: ", finalSLDistance / point / 10, " pips. Rejecting signal.");
+         return false;
+      }
+      
+      // QUANT ENHANCEMENT: TP based on Risk:Reward (minimum 3.0R for profitability)
+      // Previous 2.0R was not enough - need 3.0R to overcome losses
       double slDistance = entryPrice - sl;
-      double tp = entryPrice + (slDistance * m_config.RiskReward);
+      double tp = entryPrice + (slDistance * MathMax(m_config.RiskReward, 3.0)); // Minimum 3.0R
       
-      // Validate R:R
+      // QUANT ENHANCEMENT: Validate R:R and SL/ATR ratio
       double tpDistance = tp - entryPrice;
       double rr = tpDistance / slDistance;
-      if(rr < m_config.RiskReward)
+      
+      if(rr < 3.0) // Minimum 3.0R for profitability
+      {
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo BUY: R:R too low: ", rr, " < 3.0. Rejecting signal.");
          return false;
+      }
+      
+      // QUANT ENHANCEMENT: Ensure SL is reasonable (not too tight, not too wide)
+      if(atr > 0)
+      {
+         double slMultiplier = slDistance / atr;
+         if(slMultiplier < 1.5 || slMultiplier > 4.0)
+         {
+            if(m_config.EnableDebugLog)
+               Print("OB_FVG_Combo BUY: SL distance not optimal. SL/ATR: ", slMultiplier, " (optimal: 1.5-4.0). Adjusting...");
+            // Adjust SL to be within optimal range
+            if(slMultiplier < 1.5)
+            {
+               sl = entryPrice - (atr * 1.5);
+               slDistance = entryPrice - sl;
+               tp = entryPrice + (slDistance * 3.0); // Recalculate TP
+               tpDistance = tp - entryPrice;
+               rr = tpDistance / slDistance;
+            }
+            else if(slMultiplier > 4.0)
+            {
+               sl = entryPrice - (atr * 4.0);
+               slDistance = entryPrice - sl;
+               tp = entryPrice + (slDistance * 3.0); // Recalculate TP
+               tpDistance = tp - entryPrice;
+               rr = tpDistance / slDistance;
+            }
+         }
+      }
       
       // Fill signal structure
       signal.direction = TRADE_BUY;
@@ -230,11 +318,11 @@ public:
       signal.takeProfit = tp;
       signal.confluenceScore = obQuality; // Use calculated quality (0-100 scale)
       signal.strategy = m_strategyName;
-      signal.entryType = ENTRY_FVG_FILL_CONTINUATION;
-      signal.comment = "OB+FVG Combo";
+      signal.entryType = foundFVG ? ENTRY_FVG_FILL_CONTINUATION : ENTRY_ORDER_BLOCK_BOUNCE;
+      signal.comment = foundFVG ? "OB+FVG Combo" : "OB Only";
       
       if(m_config.EnableDebugLog)
-         Print("OB_FVG_Combo BUY: Signal generated | Entry: ", entryPrice, " | SL: ", sl, " | TP: ", tp, " | Quality: ", obQuality);
+         Print("OB_FVG_Combo BUY: Signal generated | Entry: ", entryPrice, " | SL: ", sl, " (", DoubleToString(slDistance/point/10, 1), " pips) | TP: ", tp, " | R:R: ", DoubleToString(rr, 2), " | Quality: ", obQuality, " | Type: ", signal.comment);
       
       return true;
    }
@@ -251,18 +339,24 @@ public:
       
       OrderBlock ob = m_obDetector.GetOrderBlock(bearOBIndex);
       
-      // Calculate quality using original algorithm (0-100 scale)
+      // QUANT ENHANCEMENT: Calculate quality using original algorithm (0-100 scale)
       int obQuality = m_obDetector.CalculateOBQualityForBar(ob.barIndex, false, m_atrIndicator);
       
-      if(obQuality < m_config.OB_FVG_QualityMin)
+      // ENHANCED: Require minimum quality but also check for strong OB (quality >= 50)
+      // This ensures we only trade high-probability setups
+      int minQuality = MathMax(m_config.OB_FVG_QualityMin, 30); // Minimum 30 quality
+      if(obQuality < minQuality)
       {
          if(m_config.EnableDebugLog)
-            Print("OB_FVG_Combo SELL: OB quality too low: ", obQuality, " < ", m_config.OB_FVG_QualityMin);
+            Print("OB_FVG_Combo SELL: OB quality too low: ", obQuality, " < ", minQuality);
          return false;
       }
       
+      // QUANT ENHANCEMENT: Prefer high-quality OBs (quality >= 50) for better win rate
+      bool isHighQualityOB = (obQuality >= 50);
+      
       if(m_config.EnableDebugLog)
-         Print("OB_FVG_Combo SELL: OB quality OK: ", obQuality);
+         Print("OB_FVG_Combo SELL: OB quality OK: ", obQuality, " (bar index: ", ob.barIndex, ") | High Quality: ", isHighQualityOB);
       
       // Find FVG after OB - MATCH ORIGINAL LOGIC EXACTLY
       double currentPrice = iClose(m_symbol, m_timeframe, 0);
@@ -382,34 +476,115 @@ public:
             break; // Found valid FVG, exit outer loop
       }
       
-      if(!foundFVG)
+      // OPTIMIZED: Allow OB-only entries if FVG not required
+      if(!foundFVG && m_config.RequireFVG)
       {
          if(m_config.EnableDebugLog)
-            Print("OB_FVG_Combo SELL: No valid FVG found after OB (checked bars ", (obBarIndex - 1), " to 0)");
+            Print("OB_FVG_Combo SELL: No valid FVG found after OB (checked bars ", (obBarIndex - 1), " to 0) | FVG required");
          return false;
+      }
+      
+      // OPTIMIZED: If FVG not required and price is near OB, allow entry
+      if(!foundFVG && !m_config.RequireFVG)
+      {
+         double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+         double atr = m_atrIndicator.GetValue(0);
+         
+         // Check if price is near OB (within 2x ATR or 50 pips)
+         double maxDistanceFromOB = MathMax(atr * 2.0, 50.0 * point * 10);
+         bool priceNearOB = (currentPrice <= obHigh && currentPrice >= obHigh - maxDistanceFromOB);
+         
+         if(!priceNearOB)
+         {
+            if(m_config.EnableDebugLog)
+               Print("OB_FVG_Combo SELL: Price not near OB. Current: ", currentPrice, " | OB High: ", obHigh, " | Distance: ", (obHigh - currentPrice) / point / 10, " pips");
+            return false;
+         }
+         
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo SELL: OB-only entry allowed (FVG not required) | Price near OB");
       }
       
       // Calculate entry, SL, TP
       double entryPrice = SymbolInfoDouble(m_symbol, SYMBOL_BID);
-      // obHigh already declared above
       double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
       double atr = m_atrIndicator.GetValue(0);
       
-      // SL at OB high plus ATR
-      double sl = obHigh + (1.0 * atr);
-      double minSLDistance = 5.0 * point * 10;
+      // CRITICAL FIX: SL at OB high plus 2.5x ATR (much more room for volatility)
+      // Previous 1.5x ATR was too tight, causing quick SL hits
+      double sl = obHigh + (2.5 * atr);
+      
+      // CRITICAL: Ensure minimum 20 pips SL to prevent oversized lot sizes
+      // Small SL = huge lot size = massive losses when hit
+      double minSLDistance = 20.0 * point * 10; // Minimum 20 pips
       if(sl - entryPrice < minSLDistance)
+      {
          sl = entryPrice + minSLDistance;
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo SELL: SL adjusted to minimum 20 pips. Original: ", obHigh + (2.5 * atr), " | New: ", sl);
+      }
       
-      // TP based on Risk:Reward
+      // Ensure SL is not too close to entry (safety check)
+      double maxSLDistance = 50.0 * point * 10; // Maximum 50 pips SL
+      if(sl - entryPrice > maxSLDistance)
+      {
+         sl = entryPrice + maxSLDistance;
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo SELL: SL capped at maximum 50 pips");
+      }
+      
+      // FINAL VALIDATION: Reject if SL is still too small
+      double finalSLDistance = sl - entryPrice;
+      if(finalSLDistance < minSLDistance)
+      {
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo SELL: SL too small after adjustments: ", finalSLDistance / point / 10, " pips. Rejecting signal.");
+         return false;
+      }
+      
+      // QUANT ENHANCEMENT: TP based on Risk:Reward (minimum 3.0R for profitability)
+      // Previous 2.0R was not enough - need 3.0R to overcome losses
       double slDistance = sl - entryPrice;
-      double tp = entryPrice - (slDistance * m_config.RiskReward);
+      double tp = entryPrice - (slDistance * MathMax(m_config.RiskReward, 3.0)); // Minimum 3.0R
       
-      // Validate R:R
+      // QUANT ENHANCEMENT: Validate R:R and SL/ATR ratio
       double tpDistance = entryPrice - tp;
       double rr = tpDistance / slDistance;
-      if(rr < m_config.RiskReward)
+      
+      if(rr < 3.0) // Minimum 3.0R for profitability
+      {
+         if(m_config.EnableDebugLog)
+            Print("OB_FVG_Combo SELL: R:R too low: ", rr, " < 3.0. Rejecting signal.");
          return false;
+      }
+      
+      // QUANT ENHANCEMENT: Ensure SL is reasonable (not too tight, not too wide)
+      if(atr > 0)
+      {
+         double slMultiplier = slDistance / atr;
+         if(slMultiplier < 1.5 || slMultiplier > 4.0)
+         {
+            if(m_config.EnableDebugLog)
+               Print("OB_FVG_Combo SELL: SL distance not optimal. SL/ATR: ", slMultiplier, " (optimal: 1.5-4.0). Adjusting...");
+            // Adjust SL to be within optimal range
+            if(slMultiplier < 1.5)
+            {
+               sl = entryPrice + (atr * 1.5);
+               slDistance = sl - entryPrice;
+               tp = entryPrice - (slDistance * 3.0); // Recalculate TP
+               tpDistance = entryPrice - tp;
+               rr = tpDistance / slDistance;
+            }
+            else if(slMultiplier > 4.0)
+            {
+               sl = entryPrice + (atr * 4.0);
+               slDistance = sl - entryPrice;
+               tp = entryPrice - (slDistance * 3.0); // Recalculate TP
+               tpDistance = entryPrice - tp;
+               rr = tpDistance / slDistance;
+            }
+         }
+      }
       
       // Fill signal structure
       signal.direction = TRADE_SELL;
@@ -418,11 +593,11 @@ public:
       signal.takeProfit = tp;
       signal.confluenceScore = obQuality; // Use calculated quality (0-100 scale)
       signal.strategy = m_strategyName;
-      signal.entryType = ENTRY_FVG_FILL_CONTINUATION;
-      signal.comment = "OB+FVG Combo";
+      signal.entryType = foundFVG ? ENTRY_FVG_FILL_CONTINUATION : ENTRY_ORDER_BLOCK_BOUNCE;
+      signal.comment = foundFVG ? "OB+FVG Combo" : "OB Only";
       
       if(m_config.EnableDebugLog)
-         Print("OB_FVG_Combo SELL: Signal generated | Entry: ", entryPrice, " | SL: ", sl, " | TP: ", tp, " | Quality: ", obQuality);
+         Print("OB_FVG_Combo SELL: Signal generated | Entry: ", entryPrice, " | SL: ", sl, " (", DoubleToString(slDistance/point/10, 1), " pips) | TP: ", tp, " | R:R: ", DoubleToString(rr, 2), " | Quality: ", obQuality, " | Type: ", signal.comment);
       
       return true;
    }

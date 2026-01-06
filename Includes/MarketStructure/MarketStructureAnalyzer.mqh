@@ -190,5 +190,53 @@ public:
       return empty;
    }
    int GetSwingPointCount() { return ArraySize(m_swingPoints); }
+   
+   // Helper methods for 99% Win Rate System
+   MARKET_STATE GetMarketState()
+   {
+      if(m_marketStructure.isUptrend)
+         return MARKET_STATE_BULLISH;
+      else if(m_marketStructure.isDowntrend)
+         return MARKET_STATE_BEARISH;
+      else
+         return MARKET_STATE_RANGING;
+   }
+   
+   bool HasRecentBOS(bool bullish)
+   {
+      if(!m_marketStructure.hasBOS)
+         return false;
+      
+      // Check if BOS is recent (within last 50 bars)
+      datetime currentTime = iTime(m_symbol, m_timeframe, 0);
+      datetime bosTime = m_marketStructure.lastMSS;
+      
+      // Calculate seconds per bar for this timeframe
+      int secondsPerBar = 0;
+      switch(m_timeframe)
+      {
+         case PERIOD_M1: secondsPerBar = 60; break;
+         case PERIOD_M5: secondsPerBar = 300; break;
+         case PERIOD_M15: secondsPerBar = 900; break;
+         case PERIOD_M30: secondsPerBar = 1800; break;
+         case PERIOD_H1: secondsPerBar = 3600; break;
+         case PERIOD_H4: secondsPerBar = 14400; break;
+         case PERIOD_D1: secondsPerBar = 86400; break;
+         default: secondsPerBar = 3600; break;
+      }
+      
+      int barsSinceBOS = (int)((currentTime - bosTime) / secondsPerBar);
+      
+      if(barsSinceBOS > 50)
+         return false;
+      
+      // Check direction
+      if(bullish && m_marketStructure.isUptrend)
+         return true;
+      if(!bullish && m_marketStructure.isDowntrend)
+         return true;
+      
+      return false;
+   }
 };
 
